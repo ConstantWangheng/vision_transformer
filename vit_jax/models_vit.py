@@ -135,6 +135,7 @@ class Encoder1DBlock(nn.Module):
 
     # Attention block.
     assert inputs.ndim == 3, f'Expected (batch, seq, hidden) got {inputs.shape}'
+    # ViT使用的是pre Norm
     x = nn.LayerNorm(dtype=self.dtype)(inputs)
     x = nn.MultiHeadDotProductAttention(
         dtype=self.dtype,
@@ -188,6 +189,8 @@ class Encoder(nn.Module):
     assert x.ndim == 3  # (batch, len, emb)
 
     if self.add_position_embedding:
+      # 论文 AN IMAGE IS WORTH 16X16 WORDS: TRANSFORMERS FOR IMAGE RECOGNITION AT SCALE
+      # 实现的是，可学习的位置编码；论文中提过，使用可学习位置编码或者2D位置编码在效果上无明显差异；
       x = AddPositionEmbs(
           posemb_init=nn.initializers.normal(stddev=0.02),  # from BERT.
           name='posembed_input')(
@@ -209,7 +212,12 @@ class Encoder(nn.Module):
 
 
 class VisionTransformer(nn.Module):
-  """VisionTransformer."""
+  """VisionTransformer.
+  操作步骤：
+     1、采用[patch_size, patch_size]卷积核将image变成多个patch，每个patch一个向量；patch向量前增加cls向量；
+     2、使用可学习位置编码向量，加到token embedding上；
+     3、然后进入self attention操作，包括 pre Norm、mutli-head attention、FFN 操作，里面都包括残差连接；
+  """
 
   num_classes: int
   patches: Any
@@ -261,6 +269,7 @@ class VisionTransformer(nn.Module):
     n, h, w, c = x.shape
 
     # We can merge s2d+emb into a single conv; it's the same.
+    # 这里的操作是，将image转为patch；使用的 [patch_size, patch_size] 的卷积核；
     x = nn.Conv(
         features=self.hidden_size,
         kernel_size=self.patches.size,
@@ -277,13 +286,14 @@ class VisionTransformer(nn.Module):
       x = jnp.reshape(x, [n, h * w, c])
 
       # If we want to add a class token, add it here.
+      # 定义cls向量，拼接到token向量前用于表示整张图片
       if self.classifier in ['token', 'token_unpooled']:
         cls = self.param('cls', nn.initializers.zeros, (1, 1, c))
         cls = jnp.tile(cls, [n, 1, 1])
         x = jnp.concatenate([cls, x], axis=1)
 
       x = self.encoder(name='Transformer', **self.transformer)(x, train=train)
-
+    # token表示取cls向量； gap表示取所有patch向量的平均；
     if self.classifier == 'token':
       x = x[:, 0]
     elif self.classifier == 'gap':
